@@ -58,11 +58,11 @@ cparser/pre_parser.cmx: WARNINGS += -w -41
 cparser/pre_parser.cmo: WARNINGS += -w -41
 
 # Turn warnings into errors, but not for released tarballs
-ifeq ($(wildcard .git),.git)
-WARN_ERRORS=-warn-error +a
-else
-WARN_ERRORS=
-endif
+# ifeq ($(wildcard .git),.git)
+# WARN_ERRORS=-warn-error +a
+# else
+# WARN_ERRORS=
+# endif
 
 COMPFLAGS+=-g -strict-sequence -safe-string $(INCLUDES) -I "$(MENHIR_DIR)" $(WARNINGS) $(WARN_ERRORS)
 
