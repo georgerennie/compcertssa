@@ -21,6 +21,7 @@
 /ccomp.prof
 /clightgen
 /clightgen.byte
+/ssabench
 /tools/ndfun
 /tools/modorder
 /Makefile.config

@@ -29,7 +29,7 @@ ARCHDIRS=$(ARCH)_$(BITSIZE) $(ARCH)
 endif
 
 DIRS := lib common $(ARCHDIRS) backend \
-  midend libSSA \
+  midend libSSA SSABench \
   cfrontend driver exportclight cparser
 
 COQINCLUDES := $(foreach d, $(DIRS), -R $(d) compcert.$(d))
@@ -212,6 +212,11 @@ ifeq ($(INSTALL_COQDEV),true)
 	$(MAKE) compcert.config
 endif
 
+bench:
+	@test -f .depend || $(MAKE) depend
+	$(MAKE) extraction
+	$(MAKE) ssabench
+
 proof: $(FILES:.v=.vo)
 
 # Turn off some warnings for compiling Flocq
@@ -236,6 +241,9 @@ clightgen: .depend.extr compcert.ini exportclight/Clightdefs.vo driver/Version.m
 	$(MAKE) -f Makefile.extr clightgen
 clightgen.byte: .depend.extr compcert.ini exportclight/Clightdefs.vo driver/Version.ml FORCE
 	$(MAKE) -f Makefile.extr clightgen.byte
+
+ssabench: .depend.extr compcert.ini driver/Version.ml FORCE
+	$(MAKE) -f Makefile.extr ssabench
 
 runtime:
 	$(MAKE) -C runtime
