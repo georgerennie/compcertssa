@@ -1,4 +1,21 @@
-# CompCert
+# CompCertSSA SSABench
+
+A branch of CompCertSSA to test the performance of the SSA datastructures.
+
+To build the SSA benchmark, do a standard CompCert config and build the
+`bench` target:
+```bash
+./configure x86_64-linux
+make bench -j $(nproc)
+```
+
+To run a benchmark:
+```bash
+./ssabench
+```
+
+
+# Original README
 The formally-verified C compiler.
 
 ## Overview
