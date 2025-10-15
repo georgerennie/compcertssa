@@ -2,18 +2,24 @@
 
 A branch of CompCertSSA to test the performance of the SSA datastructures.
 
-To build the SSA benchmark, do a standard CompCert config and build the
+To build the SSA benchmark, CompCert needs to be configured for an instruction
+set with an add instruction (e.g. Arm and RISC_V).
 `bench` target:
 ```bash
-./configure x86_64-linux
+./configure arm-linux
 make bench -j $(nproc)
 ```
 
 To run a benchmark:
 ```bash
-./ssabench
+./ssabench <bench-name> <number of elements>
 ```
 
+Benchmarks include
+- `add-zero` - Rewrite `(0 + a)` to `a`
+- `constant-folding` - Constant folding rewrite over an adder tree
+- `add-zero-sccp` - Run SCCP on `(0 + a)` for constant inputs, reducing to `a`'s value
+- `constant-folding-sccp` - Run SCCP on adder tree
 
 # Original README
 The formally-verified C compiler.

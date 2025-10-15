@@ -128,7 +128,7 @@ clightgen.byte: $(CLIGHTGEN_OBJS:.cmx=.cmo)
 	@echo "Linking $@"
 	@$(OCAMLC) -o $@ $(LIBS_BYTE) $+
 
-SSABENCH_OBJS :=$(shell $(MODORDER) SSABench/SSABench.cmx)
+SSABENCH_OBJS:=$(shell $(MODORDER) SSABench/SSABench.cmx)
 
 ifeq ($(OCAML_NATIVE_COMP),true)
 ssabench: $(SSABENCH_OBJS)
