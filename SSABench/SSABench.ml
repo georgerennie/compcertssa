@@ -303,20 +303,9 @@ module PatternRewriter =
         let remove node wl : t =
           { wl with node_in_stack = PTree.remove node wl.node_in_stack }
 
-        (* Adds all reachable statements in the function to a new worklist in order,
-           assuming we only use ops with one successor. Adding them in reachable
-           order helps optimizations that benefit from rewriting early instructions
-           and visiting instructions in program order *)
+        (* adds all nodes in the code to a new worklist *)
         let from_function (fn : coq_function) : t =
-          let rec go node wl =
-            let wl = push node wl in
-            let instr = PTree.get node fn.fn_code in
-            match Option.bind instr Rewriter.instr_succ with
-            | None -> wl
-            | Some succ -> go succ wl
-          in
-          let wl = go fn.fn_entrypoint empty in
-          { wl with stack = List.rev wl.stack }
+          PTree.fold (fun wl node _ -> push node wl) fn.fn_code empty
       end
 
     type t = {
@@ -352,7 +341,8 @@ module PatternRewriter =
 
     (* Replaces an operation node with a new operation that must drive the same register *)
     let replace_node_inplace node new_instr rw : t =
-      { rw with ctx = Rewriter.replace_node_inplace node new_instr rw.ctx; changed = true }
+      let wl = Worklist.push_list (Rewriter.users node rw.ctx) rw.wl in
+      { ctx = Rewriter.replace_node_inplace node new_instr rw.ctx; wl; changed = true }
 
     type rewrite_pattern = t -> node -> t option
 
