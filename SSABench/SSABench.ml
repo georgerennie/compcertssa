@@ -19,8 +19,6 @@ module Rewriter =
       prev_nodes : node PTree.t;
       (* Map from registers to nodes using their value *)
       du_chain : node list PTree.t;
-      (* Map from regs to the node defining them *)
-      reg_defs : node PTree.t;
     }
 
     let get_instr (node : node) rw : instruction option =
@@ -63,9 +61,6 @@ module Rewriter =
     let users reg rw : node list =
       PTree.get reg rw.du_chain |> Option.value ~default:[]
 
-    (* Get the reg defining a node - there must be one or panics *)
-    let definition reg rw : node = PTree.get reg rw.reg_defs |> Option.get
-
     (* Get the nodes that use a reg defined by a given instruction *)
     let instr_users instr rw : node list =
       match instr_reg instr with
@@ -94,12 +89,7 @@ module Rewriter =
 
     (* Construct a rewriter with its metadata over a function, ignoring phi nodes *)
     let from_function (fn : coq_function) : t =
-      let initial = {
-        fn;
-        prev_nodes = PTree.empty;
-        du_chain = PTree.empty;
-        reg_defs = PTree.empty
-      } in
+      let initial = { fn; prev_nodes = PTree.empty; du_chain = PTree.empty; } in
 
       let add_node rw node instr =
         (* If node transitions to succ, set node as succ's prev_node *)
@@ -111,14 +101,9 @@ module Rewriter =
 
         let du_chain = add_to_du node instr rw.du_chain in
 
-        let reg_defs =
-          match instr_reg instr with
-          | None -> rw.reg_defs
-          | Some reg -> PTree.set reg node rw.reg_defs
-        in
-
-        { rw with prev_nodes; du_chain; reg_defs }
+        { rw with prev_nodes; du_chain }
       in
+
       PTree.fold add_node fn.fn_code initial
 
     (* Detach a node from the control flow - this doesn't remove its users from
@@ -172,6 +157,7 @@ module Rewriter =
 
       let instr = get_instr node rw |> Option.get in
       let reg = instr_reg instr in
+
       let remove_reg ptree =
         match reg with
         | None -> ptree
@@ -184,10 +170,9 @@ module Rewriter =
         |> remove_from_du node instr
       in
 
-      let reg_defs = remove_reg rw.reg_defs in
       let fn_code = PTree.remove node rw.fn.fn_code in
 
-      { rw with fn = { rw.fn with fn_code }; du_chain; reg_defs }
+      { rw with fn = { rw.fn with fn_code }; du_chain }
 
     (* Map the args of an instruction from old_node to new_node *)
     let map_instr_args old_reg new_reg instr : instruction =
