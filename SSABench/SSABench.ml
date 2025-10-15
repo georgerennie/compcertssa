@@ -14,7 +14,7 @@ let (let+) o f = Option.map f o
 module Rewriter =
   struct
     type t = {
-      fn : coq_function;
+      code : code;
       (* Map from nodes to previous node in the program order *)
       prev_nodes : node PTree.t;
       (* Map from registers to nodes using their value *)
@@ -22,9 +22,9 @@ module Rewriter =
     }
 
     let get_instr (node : node) rw : instruction option =
-      PTree.get node rw.fn.fn_code
+      PTree.get node rw.code
 
-    let get_function rw : coq_function = rw.fn
+    let get_code rw : code = rw.code
 
     (* Get the reg defined by an instruction *)
     let instr_reg instr : reg option =
@@ -87,9 +87,9 @@ module Rewriter =
       in
       List.fold_left add du_chain (instr_args instr)
 
-    (* Construct a rewriter with its metadata over a function, ignoring phi nodes *)
-    let from_function (fn : coq_function) : t =
-      let initial = { fn; prev_nodes = PTree.empty; du_chain = PTree.empty; } in
+    (* Construct a rewriter with its metadata over a function body *)
+    let from_code (code : code) : t =
+      let initial = { code; prev_nodes = PTree.empty; du_chain = PTree.empty; } in
 
       let add_node rw node instr =
         (* If node transitions to succ, set node as succ's prev_node *)
@@ -104,7 +104,7 @@ module Rewriter =
         { rw with prev_nodes; du_chain }
       in
 
-      PTree.fold add_node fn.fn_code initial
+      PTree.fold add_node code initial
 
     (* Detach a node from the control flow - this doesn't remove its users from
        the DU chain. The node must have a successor node in the control flow *)
@@ -142,13 +142,13 @@ module Rewriter =
       in
 
       (* Update prev instruction to point at new successor *)
-      let fn_code =
+      let code =
         get_instr prev_node rw
         |> Option.get
         |> map_instr
-        |> fun new_instr -> PTree.set prev_node new_instr rw.fn.fn_code
+        |> fun new_instr -> PTree.set prev_node new_instr rw.code
       in
-      { rw with fn = { rw.fn with fn_code }; prev_nodes }
+      { rw with code; prev_nodes }
 
     (* Erase a node from the function, detaching it and updating the
        def-use chain and reg definition map *)
@@ -170,9 +170,9 @@ module Rewriter =
         |> remove_from_du node instr
       in
 
-      let fn_code = PTree.remove node rw.fn.fn_code in
+      let code = PTree.remove node rw.code in
 
-      { rw with fn = { rw.fn with fn_code }; du_chain }
+      { rw with code; du_chain }
 
     (* Map the args of an instruction from old_node to new_node *)
     let map_instr_args old_reg new_reg instr : instruction =
@@ -207,13 +207,13 @@ module Rewriter =
       let new_node_users = (users new_reg rw) in
 
       (* Update the users of the old node to instead use the new node *)
-      let update_user fn_code user =
-        PTree.get user fn_code
+      let update_user code user =
+        PTree.get user code
         |> Option.get
         |> map_instr_args old_reg new_reg
-        |> fun instr -> PTree.set user instr fn_code
+        |> fun instr -> PTree.set user instr code
       in
-      let fn_code = List.fold_left update_user rw.fn.fn_code old_node_users in
+      let code = List.fold_left update_user rw.code old_node_users in
 
       (* TODO: dedup the use list *)
 
@@ -221,7 +221,7 @@ module Rewriter =
       let combined_users = List.append old_node_users new_node_users in
       let du_chain = PTree.set new_reg combined_users rw.du_chain in
 
-      let rw = { rw with fn = { rw.fn with fn_code }; du_chain } in
+      let rw = { rw with code; du_chain } in
       let rw = erase_node old_node rw in
       (rw, old_node_users)
 
@@ -242,9 +242,9 @@ module Rewriter =
         |> add_to_du node new_instr
       in
 
-      let fn_code = PTree.set node new_instr rw.fn.fn_code in
+      let code = PTree.set node new_instr rw.code in
 
-      { rw with du_chain; fn = { rw.fn with fn_code } }
+      { rw with du_chain; code }
 
   end
 
@@ -289,8 +289,8 @@ module PatternRewriter =
           { wl with node_in_stack = PTree.remove node wl.node_in_stack }
 
         (* adds all nodes in the code to a new worklist *)
-        let from_function (fn : coq_function) : t =
-          PTree.fold (fun wl node _ -> push node wl) fn.fn_code empty
+        let from_code (code : code) : t =
+          PTree.fold (fun wl node _ -> push node wl) code empty
       end
 
     type t = {
@@ -299,8 +299,8 @@ module PatternRewriter =
       changed : bool;
     }
 
-    let from_function (fn : coq_function) : t =
-      { ctx = Rewriter.from_function fn; wl = Worklist.from_function fn; changed = false }
+    let from_rewriter (ctx : Rewriter.t) : t =
+      { ctx; wl = Worklist.from_code (Rewriter.get_code ctx); changed = false }
 
     let get_instr node rw : instruction option =
       Rewriter.get_instr node rw.ctx
@@ -336,22 +336,25 @@ module PatternRewriter =
 
     (* Apply the given rewrite pattern to all operations in the function.
        Return the new context, and a boolean indicating whether any changes were made. *)
-    let apply_once_in_function (pattern : rewrite_pattern) (fn : coq_function) : (coq_function * bool) =
-      let rw = from_function fn in
+    let apply_once_in_code (pattern : rewrite_pattern) (ctx : Rewriter.t) : (Rewriter.t * bool) =
+      let rw = from_rewriter ctx in
       let rec go rw =
         match worklist_pop rw with
-        | None -> Rewriter.get_function rw.ctx, rw.changed
+        | None -> rw.ctx, rw.changed
         | Some (rw, node) -> go (pattern rw node |> Option.value ~default:rw)
       in
       go rw
 
-    let apply_in_function (pattern : rewrite_pattern) (fn : coq_function) : coq_function =
-      let rec go fn =
-        match apply_once_in_function pattern fn with
-        | fn, false -> fn
-        | fn, true -> go fn
+    let apply_in_code (pattern : rewrite_pattern) (code : code) : code =
+      let rec go ctx =
+        match apply_once_in_code pattern ctx with
+        | ctx, false -> Rewriter.get_code ctx
+        | ctx, true -> go ctx
       in
-      go fn
+      go (Rewriter.from_code code)
+
+    let apply_in_function (pattern : rewrite_pattern) (fn : coq_function) : coq_function =
+      { fn with fn_code = apply_in_code pattern fn.fn_code }
   end
 
 module FnBuilder =
