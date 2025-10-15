@@ -350,31 +350,23 @@ module PatternRewriter =
       Worklist.pop rw.wl |> Option.map (fun (wl, n) -> ({ rw with wl }, n))
 
     (* Apply the given rewrite pattern to all operations in the function.
-       Return the new context, and a boolean indicating whether any changes were made.
-       If any pattern failed, return None. *)
-    let apply_once_in_function (pattern : rewrite_pattern) (fn : coq_function) : (coq_function * bool) option =
+       Return the new context, and a boolean indicating whether any changes were made. *)
+    let apply_once_in_function (pattern : rewrite_pattern) (fn : coq_function) : (coq_function * bool) =
       let rw = from_function fn in
       let rec go rw =
         match worklist_pop rw with
-        | None -> Some (Rewriter.get_function rw.ctx, rw.changed)
-        | Some (rw, node) ->
-          match pattern rw node with
-          | None -> None
-          | Some rw -> go rw
+        | None -> Rewriter.get_function rw.ctx, rw.changed
+        | Some (rw, node) -> go (pattern rw node |> Option.value ~default:rw)
       in
       go rw
 
-    let try_apply_in_function (pattern : rewrite_pattern) (fn : coq_function) : coq_function option =
+    let apply_in_function (pattern : rewrite_pattern) (fn : coq_function) : coq_function =
       let rec go fn =
         match apply_once_in_function pattern fn with
-        | None -> None
-        | Some (fn, false) -> Some fn
-        | Some (fn, true) -> go fn
+        | fn, false -> fn
+        | fn, true -> go fn
       in
       go fn
-
-    let apply_in_function (pattern : rewrite_pattern) (fn : coq_function) : coq_function =
-      try_apply_in_function pattern fn |> Option.value ~default:fn
   end
 
 module FnBuilder =
@@ -445,8 +437,6 @@ let add_zero_benchmark i = add_tree_benchmark i 42l 0l
 let add_const_benchmark i = add_tree_benchmark i 42l 1l
 
 let add_zero_folding_pattern (rw : PatternRewriter.t) node : PatternRewriter.t option =
-  (* If we fail to match, just return the rewriter, don't completely fail *)
-  Option.some @@ Option.value ~default:rw @@
   let* instr = PatternRewriter.get_instr node rw in
   let* (lhs, rhs) =
     match instr with
@@ -468,8 +458,6 @@ let add_zero_folding_pattern (rw : PatternRewriter.t) node : PatternRewriter.t o
   |> Option.some
 
 let add_const_folding_pattern (rw : PatternRewriter.t) node : PatternRewriter.t option =
-  (* If we fail to match, just return the rewriter, don't completely fail *)
-  Option.some @@ Option.value ~default:rw @@
   let* instr = PatternRewriter.get_instr node rw in
   let* (lhs, rhs, reg, next) =
     match instr with
