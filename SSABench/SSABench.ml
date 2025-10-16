@@ -19,6 +19,8 @@ module Rewriter =
       prev_nodes : node PTree.t;
       (* Map from registers to nodes using their value *)
       du_chain : node list PTree.t;
+      (* Map from regs to the node defining them *)
+      reg_defs : node PTree.t;
     }
 
     let get_instr (node : node) rw : instruction option =
@@ -61,6 +63,9 @@ module Rewriter =
     let users reg rw : node list =
       PTree.get reg rw.du_chain |> Option.value ~default:[]
 
+    (* Get the reg defining a node if there is one *)
+    let definition rw reg : node option = PTree.get reg rw.reg_defs
+
     (* Get the nodes that use a reg defined by a given instruction *)
     let instr_users instr rw : node list =
       match instr_reg instr with
@@ -89,7 +94,12 @@ module Rewriter =
 
     (* Construct a rewriter with its metadata over a function body *)
     let from_code (code : code) : t =
-      let initial = { code; prev_nodes = PTree.empty; du_chain = PTree.empty; } in
+      let initial = {
+        code;
+        prev_nodes = PTree.empty;
+        du_chain = PTree.empty;
+        reg_defs = PTree.empty;
+      } in
 
       let add_node rw node instr =
         (* If node transitions to succ, set node as succ's prev_node *)
@@ -101,9 +111,14 @@ module Rewriter =
 
         let du_chain = add_to_du node instr rw.du_chain in
 
-        { rw with prev_nodes; du_chain }
-      in
+        let reg_defs =
+          match instr_reg instr with
+          | None -> rw.reg_defs
+          | Some reg -> PTree.set reg node rw.reg_defs
+        in
 
+        { rw with prev_nodes; du_chain; reg_defs }
+      in
       PTree.fold add_node code initial
 
     (* Detach a node from the control flow - this doesn't remove its users from
@@ -170,9 +185,10 @@ module Rewriter =
         |> remove_from_du node instr
       in
 
+      let reg_defs = remove_reg rw.reg_defs in
       let code = PTree.remove node rw.code in
 
-      { rw with code; du_chain }
+      { rw with code; du_chain; reg_defs }
 
     (* Map the args of an instruction from old_node to new_node *)
     let map_instr_args old_reg new_reg instr : instruction =
@@ -305,6 +321,10 @@ module PatternRewriter =
     let get_instr node rw : instruction option =
       Rewriter.get_instr node rw.ctx
 
+    (* Get the reg defining a node *)
+    let definition rw reg : node option =
+      Rewriter.definition rw.ctx reg
+
     (* Erase an unused node. The caller must confirm it is unused.
        This detaches it, erases it and removes it from worklists *)
     let erase_node node rw : t =
@@ -377,7 +397,7 @@ module FnBuilder =
         f = {
           fn_sig = {
             sig_args = [];
-            sig_res = Tvoid;
+            sig_res = Tret Tint;
             sig_cc = cc_default;
           };
           fn_params = [];
@@ -399,13 +419,8 @@ module FnBuilder =
       add b (fun r n -> Iop (Ointconst (coqint_of_camlint const), [], r, n))
 
     let return b (r : reg) : coq_function =
-      let (sig_res, reg) =
-        match PTree.get r b.f.fn_code with
-        | Some (Iop (op, _, _, _)) -> (Tret (snd (type_of_operation op)), Some r)
-        | _ -> (Tvoid, None)
-      in
-      let (b, _) = add b (fun _ _ -> Ireturn reg) in
-      { b.f with fn_sig = { b.f.fn_sig with sig_res } }
+      let (b, _) = add b (fun _ _ -> Ireturn (Some r)) in
+      b.f
 
   end
 
@@ -426,11 +441,13 @@ let add_const_benchmark i = add_tree_benchmark i 42l 1l
 
 let add_zero_folding_pattern (rw : PatternRewriter.t) node : PatternRewriter.t option =
   let* instr = PatternRewriter.get_instr node rw in
-  let* (lhs, rhs) =
+  let* (lhs_reg, rhs_reg) =
     match instr with
     | Iop (Oadd, [lhs; rhs], _, _) -> Some (lhs, rhs)
     | _ -> None
   in
+  let* lhs = PatternRewriter.definition rw lhs_reg in
+  let* rhs = PatternRewriter.definition rw rhs_reg in
 
   (* Get the left hand side and check it is constant 0 *)
   let* lhs_instr = PatternRewriter.get_instr lhs rw in
@@ -447,11 +464,13 @@ let add_zero_folding_pattern (rw : PatternRewriter.t) node : PatternRewriter.t o
 
 let add_const_folding_pattern (rw : PatternRewriter.t) node : PatternRewriter.t option =
   let* instr = PatternRewriter.get_instr node rw in
-  let* (lhs, rhs, reg, next) =
+  let* (lhs_reg, rhs_reg, reg, next) =
     match instr with
     | Iop (Oadd, [lhs; rhs], reg, next) -> Some (lhs, rhs, reg, next)
     | _ -> None
   in
+  let* lhs = PatternRewriter.definition rw lhs_reg in
+  let* rhs = PatternRewriter.definition rw rhs_reg in
 
   let get_const node =
     match PatternRewriter.get_instr node rw with
