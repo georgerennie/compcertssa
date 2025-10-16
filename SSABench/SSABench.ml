@@ -23,7 +23,7 @@ module Rewriter =
       reg_defs : node PTree.t;
     }
 
-    let get_instr (node : node) rw : instruction option =
+    let get_instr rw (node : node) : instruction option =
       PTree.get node rw.code
 
     let get_code rw : code = rw.code
@@ -60,17 +60,11 @@ module Rewriter =
         | _ -> assert false 
 
     (* Get the nodes that use a given reg *)
-    let users reg rw : node list =
+    let users rw reg : node list =
       PTree.get reg rw.du_chain |> Option.value ~default:[]
 
     (* Get the reg defining a node if there is one *)
     let definition rw reg : node option = PTree.get reg rw.reg_defs
-
-    (* Get the nodes that use a reg defined by a given instruction *)
-    let instr_users instr rw : node list =
-      match instr_reg instr with
-      | Some reg -> users reg rw
-      | None -> []
 
     (* Remove node from the du_chains of its args *)
     let remove_from_du node instr du_chain : node list PTree.t =
@@ -102,19 +96,19 @@ module Rewriter =
       } in
 
       let add_node rw node instr =
-        (* If node transitions to succ, set node as succ's prev_node *)
-        let prev_nodes =
-          instr_succ instr
-          |> Option.map (fun succ -> PTree.set succ node rw.prev_nodes)
-          |> Option.value ~default:rw.prev_nodes
+        let set_ref tree idx =
+          match idx with
+          | Some n -> PTree.set n node tree
+          | None -> tree
         in
 
+        (* If node transitions to succ, set node as succ's prev_node *)
+        let prev_nodes = set_ref rw.prev_nodes (instr_succ instr) in
         let du_chain = add_to_du node instr rw.du_chain in
-
         let reg_defs =
           match instr_reg instr with
-          | None -> rw.reg_defs
           | Some reg -> PTree.set reg node rw.reg_defs
+          | None -> rw.reg_defs
         in
 
         { rw with prev_nodes; du_chain; reg_defs }
@@ -124,7 +118,7 @@ module Rewriter =
     (* Detach a node from the control flow - this doesn't remove its users from
        the DU chain. The node must have a successor node in the control flow *)
     let detach_node node rw : t =
-      let instr = get_instr node rw |> Option.get in
+      let instr = get_instr rw node |> Option.get in
 
       (* we don't support ops without a single successor for now *)
       let succ = instr_succ instr |> Option.get in
@@ -158,7 +152,7 @@ module Rewriter =
 
       (* Update prev instruction to point at new successor *)
       let code =
-        get_instr prev_node rw
+        get_instr rw prev_node
         |> Option.get
         |> map_instr
         |> fun new_instr -> PTree.set prev_node new_instr rw.code
@@ -170,7 +164,7 @@ module Rewriter =
     let erase_node node rw : t =
       let rw = detach_node node rw in
 
-      let instr = get_instr node rw |> Option.get in
+      let instr = get_instr rw node |> Option.get in
       let reg = instr_reg instr in
 
       let remove_reg ptree =
@@ -215,12 +209,12 @@ module Rewriter =
        Returns the new rewriter as well as the list of nodes that used the result
        of the old node. *)
     let replace_node old_node new_node rw : t * node list =
-      let old_instr = get_instr old_node rw |> Option.get in
-      let new_instr = get_instr new_node rw |> Option.get in
+      let old_instr = get_instr rw old_node |> Option.get in
+      let new_instr = get_instr rw new_node |> Option.get in
       let old_reg = instr_reg old_instr |> Option.get in
       let new_reg = instr_reg new_instr |> Option.get in
-      let old_node_users = (users old_reg rw) in
-      let new_node_users = (users new_reg rw) in
+      let old_node_users = users rw old_reg in
+      let new_node_users = users rw new_reg in
 
       (* Update the users of the old node to instead use the new node *)
       let update_user code user =
@@ -244,7 +238,7 @@ module Rewriter =
     (* Replace an operation node with a new operation in place, writing to the
        same register and with the same successor *)
     let replace_node_inplace node new_instr rw : t =
-      let old_instr = get_instr node rw |> Option.get in
+      let old_instr = get_instr rw node |> Option.get in
 
       let new_instr =
         match (old_instr, new_instr) with
@@ -318,8 +312,8 @@ module PatternRewriter =
     let from_rewriter (ctx : Rewriter.t) : t =
       { ctx; wl = Worklist.from_code (Rewriter.get_code ctx); changed = false }
 
-    let get_instr node rw : instruction option =
-      Rewriter.get_instr node rw.ctx
+    let get_instr rw node : instruction option =
+      Rewriter.get_instr rw.ctx node
 
     (* Get the reg defining a node *)
     let definition rw reg : node option =
@@ -333,7 +327,7 @@ module PatternRewriter =
       { ctx; wl; changed = true }
 
     let erase_node_if_unused node rw : t =
-      match (Rewriter.users node rw.ctx) with
+      match (Rewriter.users rw.ctx node) with
       | [] -> erase_node node rw
       | _ -> rw
 
@@ -346,7 +340,7 @@ module PatternRewriter =
 
     (* Replaces an operation node with a new operation that must drive the same register *)
     let replace_node_inplace node new_instr rw : t =
-      let wl = Worklist.push_list (Rewriter.users node rw.ctx) rw.wl in
+      let wl = Worklist.push_list (Rewriter.users rw.ctx node) rw.wl in
       { ctx = Rewriter.replace_node_inplace node new_instr rw.ctx; wl; changed = true }
 
     type rewrite_pattern = t -> node -> t option
@@ -379,21 +373,21 @@ module PatternRewriter =
 
 module FnBuilder =
   struct
-    type builder = {
+    type t = {
       f : coq_function;
       insertion_index : P.t;
     }
 
-    let add b (instr_fn : reg -> node -> instruction) : builder * reg =
+    let add (instr_fn : reg -> node -> instruction) b : t * reg =
       let index = b.insertion_index in
       let next_index = P.succ index in
       let instr = instr_fn index next_index in
       let fn_code = PTree.set index instr b.f.fn_code in
       ({ f = { b.f with fn_code }; insertion_index = next_index }, index)
 
-    let empty : builder =
+    let empty : t =
       let initial_index = P.one in
-      let b = {
+      {
         f = {
           fn_sig = {
             sig_args = [];
@@ -409,29 +403,32 @@ module FnBuilder =
           fn_dom_test = fun _ _ -> assert false;
         };
         insertion_index = initial_index
-      } in
+      }
       (* SCCP requires all operations to be reached via edges so the first op
          ends up needing to be a no-op *)
-      let (b, _) = add b (fun _ next -> Inop next) in
+      |> add (fun _ next -> Inop next)
+      |> fst
+
+    let int_const const b : t * reg =
+      b |> add (fun r n -> Iop (Ointconst (coqint_of_camlint const), [], r, n))
+
+    let return (r : reg) b : coq_function =
       b
-
-    let int_const b const : builder * reg =
-      add b (fun r n -> Iop (Ointconst (coqint_of_camlint const), [], r, n))
-
-    let return b (r : reg) : coq_function =
-      let (b, _) = add b (fun _ _ -> Ireturn (Some r)) in
-      b.f
+      |> add (fun _ _ -> Ireturn (Some r))
+      |> fun (b, _) -> b.f
 
   end
 
 let add_tree_benchmark i init_const add_const =
-  let b = FnBuilder.empty in
-  let (b, root) = FnBuilder.int_const b init_const in
+  let (b, root) =
+    FnBuilder.empty
+    |> FnBuilder.int_const init_const
+  in
   let rec go b acc = function
-    | 0 -> FnBuilder.return b acc
+    | 0 -> b |> FnBuilder.return acc
     | i ->
-      let (b, const) = FnBuilder.int_const b add_const in
-      let (b, acc) = FnBuilder.add b (fun r n -> Iop (Oadd, [const; acc], r, n)) in
+      let (b, const) = b |> FnBuilder.int_const add_const in
+      let (b, acc) = b |> FnBuilder.add (fun r n -> Iop (Oadd, [const; acc], r, n)) in
       go b acc (i - 1)
   in
   go b root i
@@ -440,7 +437,7 @@ let add_zero_benchmark i = add_tree_benchmark i 42l 0l
 let add_const_benchmark i = add_tree_benchmark i 42l 1l
 
 let add_zero_folding_pattern (rw : PatternRewriter.t) node : PatternRewriter.t option =
-  let* instr = PatternRewriter.get_instr node rw in
+  let* instr = PatternRewriter.get_instr rw node in
   let* (lhs_reg, rhs_reg) =
     match instr with
     | Iop (Oadd, [lhs; rhs], _, _) -> Some (lhs, rhs)
@@ -450,7 +447,7 @@ let add_zero_folding_pattern (rw : PatternRewriter.t) node : PatternRewriter.t o
   let* rhs = PatternRewriter.definition rw rhs_reg in
 
   (* Get the left hand side and check it is constant 0 *)
-  let* lhs_instr = PatternRewriter.get_instr lhs rw in
+  let* lhs_instr = PatternRewriter.get_instr rw lhs in
   let* const0 =
     match lhs_instr with
     | Iop (Ointconst n, [], _, _) when Z.eq n Z.zero -> Some ()
@@ -463,7 +460,7 @@ let add_zero_folding_pattern (rw : PatternRewriter.t) node : PatternRewriter.t o
   |> Option.some
 
 let add_const_folding_pattern (rw : PatternRewriter.t) node : PatternRewriter.t option =
-  let* instr = PatternRewriter.get_instr node rw in
+  let* instr = PatternRewriter.get_instr rw node in
   let* (lhs_reg, rhs_reg, reg, next) =
     match instr with
     | Iop (Oadd, [lhs; rhs], reg, next) -> Some (lhs, rhs, reg, next)
@@ -473,7 +470,7 @@ let add_const_folding_pattern (rw : PatternRewriter.t) node : PatternRewriter.t 
   let* rhs = PatternRewriter.definition rw rhs_reg in
 
   let get_const node =
-    match PatternRewriter.get_instr node rw with
+    match PatternRewriter.get_instr rw node with
     | Some (Iop (Ointconst n, [], _, _)) -> Some n
     | _ -> None
   in
