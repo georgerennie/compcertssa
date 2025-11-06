@@ -491,7 +491,7 @@ let rewrite_add_const = PatternRewriter.apply_in_function add_const_folding_patt
 let time name f =
   let t = Unix.gettimeofday () in
   let res = f () in
-  printf "%s time: %.10fs\n" name (Unix.gettimeofday () -. t);
+  printf "%s time (s): %.10f\n" name (Unix.gettimeofday () -. t);
   res
 
 let run_bench name n =
