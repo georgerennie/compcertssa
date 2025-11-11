@@ -436,6 +436,20 @@ let add_tree_benchmark i init_const add_const =
 let add_zero_benchmark i = add_tree_benchmark i 42l 0l
 let add_const_benchmark i = add_tree_benchmark i 42l 1l
 
+let mul2_tree_benchmark n root =
+  let (b, root) =
+    FnBuilder.empty
+    |> FnBuilder.int_const root
+  in
+  let rec go b acc = function
+    | 0 -> b |> FnBuilder.return acc
+    | i ->
+      let (b, const) = b |> FnBuilder.int_const 2l in
+      let (b, acc) = b |> FnBuilder.add (fun r n -> Iop (Omul, [acc; const], r, n)) in
+      go b acc (i - 1)
+  in
+  go b root n
+
 let add_zero_folding_pattern (rw : PatternRewriter.t) node : PatternRewriter.t option =
   let* instr = PatternRewriter.get_instr rw node in
   let* (lhs_reg, rhs_reg) =
@@ -457,6 +471,31 @@ let add_zero_folding_pattern (rw : PatternRewriter.t) node : PatternRewriter.t o
   rw
   |> PatternRewriter.replace_node node rhs
   |> PatternRewriter.erase_node_if_unused lhs
+  |> Option.some
+
+let mul2_strength_red_pattern (rw : PatternRewriter.t) node : PatternRewriter.t option =
+  let* instr = PatternRewriter.get_instr rw node in
+  let* (lhs_reg, rhs_reg, reg, next) =
+    match instr with
+    | Iop (Omul, [lhs; rhs], reg, next) -> Some (lhs, rhs, reg, next)
+    | _ -> None
+  in
+  let* lhs = PatternRewriter.definition rw lhs_reg in
+  let* rhs = PatternRewriter.definition rw rhs_reg in
+
+  (* Get the right hand side and check it is constant 2 *)
+  let* rhs_instr = PatternRewriter.get_instr rw rhs in
+  let* const2 =
+    match rhs_instr with
+    | Iop (Ointconst n, [], _, _) when Z.eq n (Z.of_uint 2) -> Some ()
+    | _ -> None
+  in
+
+  let new_node = Iop (Oadd, [lhs; lhs], reg, next) in
+
+  rw
+  |> PatternRewriter.replace_node_inplace node new_node
+  |> PatternRewriter.erase_node_if_unused rhs
   |> Option.some
 
 let add_const_folding_pattern (rw : PatternRewriter.t) node : PatternRewriter.t option =
@@ -487,6 +526,7 @@ let add_const_folding_pattern (rw : PatternRewriter.t) node : PatternRewriter.t 
 
 let rewrite_add_zero = PatternRewriter.apply_in_function add_zero_folding_pattern
 let rewrite_add_const = PatternRewriter.apply_in_function add_const_folding_pattern
+let rewrite_mul2_red = PatternRewriter.apply_in_function mul2_strength_red_pattern
 
 let time name f =
   let t = Unix.gettimeofday () in
@@ -508,6 +548,7 @@ let run_bench name n =
   | "add-zero-sccp" -> run add_zero_benchmark SCCPopt.transf_function false
   | "constant-folding" -> run add_const_benchmark rewrite_add_const true
   | "constant-folding-sccp" -> run add_const_benchmark SCCPopt.transf_function false
+  | "mul2-reduce" -> run (fun n -> mul2_tree_benchmark n 42l) rewrite_mul2_red false
   | s -> printf "Unrecognised benchmark %s\n" s
 
 let _ =
