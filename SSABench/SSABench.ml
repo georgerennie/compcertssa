@@ -184,6 +184,11 @@ module Rewriter =
 
       { rw with code; du_chain; reg_defs }
 
+    let erase_node_if_unused node rw : t =
+      match (users rw node) with
+      | [] -> erase_node node rw
+      | _ -> rw
+
     (* Map the args of an instruction from old_node to new_node *)
     let map_instr_args old_reg new_reg instr : instruction =
       let map_one = function
@@ -436,6 +441,54 @@ let add_tree_benchmark i init_const add_const =
 let add_zero_benchmark i = add_tree_benchmark i 42l 0l
 let add_const_benchmark i = add_tree_benchmark i 42l 1l
 
+let add_tree_benchmark_with_reuse n root inc =
+  (* Create a program that looks like:
+     func @main() -> i32 {
+       %0 = arith.constant 3 : i32
+       %reuse = arith.constant inc : i32
+       %2 = arith.addi %reuse, %0 : i32
+       %3 = arith.addi %reuse, %2 : i32
+       ...
+  *)
+  let (b, root) = FnBuilder.empty |> FnBuilder.int_const root in
+  let (b, reuse) = b |> FnBuilder.int_const inc in
+
+  let rec go b acc = function
+    | 0 -> b |> FnBuilder.return acc
+    | i ->
+      let (b, acc) = b |> FnBuilder.add (fun r n -> Iop (Oadd, [reuse; acc], r, n)) in
+      go b acc (i - 1)
+  in
+  go b root n
+
+let add_zero_reuse_benchmark n = add_tree_benchmark_with_reuse n 42l 0l
+
+let add_tree_benchmark_one_operation_lots_of_reuse n root inc =
+  (* Create a program that looks like:
+    func @main() -> i32 {
+      %0 = arith.constant 3 : i32
+      %1 = arith.constant inc : i32
+      %reuse = arith.addi %0, %1 : i32
+      %3 = arith.addi %reuse, %reuse : i32
+      %4 = arith.addi %3, %reuse : i32
+      %5 = arith.addi %4, %reuse : i32
+      ...
+  *)
+  let b = FnBuilder.empty in
+  let (b, root) = b |> FnBuilder.int_const root in
+  let (b, constinc) = b |> FnBuilder.int_const inc in
+  let (b, reuse) = b |> FnBuilder.add (fun r n -> Iop (Oadd, [constinc; root], r, n)) in
+
+  let rec go b acc = function
+    | 0 -> b |> FnBuilder.return acc
+    | i ->
+      let (b, acc) = b |> FnBuilder.add (fun r n -> Iop (Oadd, [acc; reuse], r, n)) in
+      go b acc (i - 1)
+  in
+  go b reuse n
+
+let add_zero_one_operation_reuse_benchmark n = add_tree_benchmark_one_operation_lots_of_reuse n 42l 0l
+
 let mul2_tree_benchmark n root =
   let (b, root) =
     FnBuilder.empty
@@ -471,6 +524,30 @@ let add_zero_folding_pattern (rw : PatternRewriter.t) node : PatternRewriter.t o
   rw
   |> PatternRewriter.replace_node node rhs
   |> PatternRewriter.erase_node_if_unused lhs
+  |> Option.some
+
+(* Same as above but without using PatternRewriter so no worklist *)
+let add_zero_folding_rw (rw : Rewriter.t) node : Rewriter.t option =
+  let* instr = Rewriter.get_instr rw node in
+  let* (lhs_reg, rhs_reg) =
+    match instr with
+    | Iop (Oadd, [lhs; rhs], _, _) -> Some (lhs, rhs)
+    | _ -> None
+  in
+  let* lhs = Rewriter.definition rw lhs_reg in
+  let* rhs = Rewriter.definition rw rhs_reg in
+
+  (* Get the left hand side and check it is constant 0 *)
+  let* lhs_instr = Rewriter.get_instr rw lhs in
+  let* const0 =
+    match lhs_instr with
+    | Iop (Ointconst n, [], _, _) when Z.eq n Z.zero -> Some ()
+    | _ -> None
+  in
+
+  let (rw, _) = rw |> Rewriter.replace_node node rhs in
+  rw
+  |> Rewriter.erase_node_if_unused lhs
   |> Option.some
 
 let mul2_strength_red_pattern (rw : PatternRewriter.t) node : PatternRewriter.t option =
@@ -528,6 +605,19 @@ let rewrite_add_zero = PatternRewriter.apply_in_function add_zero_folding_patter
 let rewrite_add_const = PatternRewriter.apply_in_function add_const_folding_pattern
 let rewrite_mul2_red = PatternRewriter.apply_in_function mul2_strength_red_pattern
 
+let rewrite_add_zero_one_operation (fn : coq_function) : coq_function =
+  let rw = Rewriter.from_code fn.fn_code in
+  let rec first_add i =
+    let instr = Rewriter.get_instr rw i |> Option.get in
+    match instr with
+    | (Iop (Oadd, _, _, _)) -> i
+    | _ -> first_add (Rewriter.instr_succ instr |> Option.get)
+  in
+
+  let add_op = first_add fn.fn_entrypoint in
+  let rw = add_zero_folding_rw rw add_op |> Option.get in
+  { fn with fn_code = Rewriter.get_code rw }
+
 let time name f =
   let t = Unix.gettimeofday () in
   let res = f () in
@@ -545,6 +635,9 @@ let run_bench name n =
 
   match name with
   | "add-zero" -> run add_zero_benchmark rewrite_add_zero true
+  | "add-zero-reuse" -> run add_zero_reuse_benchmark rewrite_add_zero true
+  | "add-zero-one-operation-reuse" ->
+    run add_zero_one_operation_reuse_benchmark rewrite_add_zero_one_operation false
   | "add-zero-sccp" -> run add_zero_benchmark SCCPopt.transf_function false
   | "constant-folding" -> run add_const_benchmark rewrite_add_const true
   | "constant-folding-sccp" -> run add_const_benchmark SCCPopt.transf_function false
