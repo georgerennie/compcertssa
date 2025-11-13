@@ -86,9 +86,35 @@ module Pattern =
 
 (* Rewrites as above but without using the PatternRewriter interface, instead
    applying the rewrites in custom locations *)
-module CustomRewriter =
+module Custom =
   struct
     type pattern = Rewriter.t -> node -> Rewriter.t option
+
+    let add_constant_folding (rw : Rewriter.t) node : Rewriter.t option =
+      let* instr = Rewriter.get_instr rw node in
+      let* (lhs_reg, rhs_reg, reg, next) =
+        match instr with
+        | Iop (Oadd, [lhs; rhs], reg, next) -> Some (lhs, rhs, reg, next)
+        | _ -> None
+      in
+      let* lhs = Rewriter.definition rw lhs_reg in
+      let* rhs = Rewriter.definition rw rhs_reg in
+
+      let get_const node =
+        match Rewriter.get_instr rw node with
+        | Some (Iop (Ointconst n, [], _, _)) -> Some n
+        | _ -> None
+      in
+
+      let* lhs_val = get_const lhs in
+      let* rhs_val = get_const rhs in
+      let new_val = Z.add lhs_val rhs_val in
+
+      rw
+      |> Rewriter.replace_node_inplace node (Iop (Ointconst new_val, [], reg, next))
+      |> Rewriter.erase_node_if_unused lhs
+      |> Rewriter.erase_node_if_unused rhs
+      |> Option.some
 
     let add_zero_folding (rw : Rewriter.t) node : Rewriter.t option =
       let* instr = Rewriter.get_instr rw node in
@@ -113,6 +139,31 @@ module CustomRewriter =
       |> Rewriter.erase_node_if_unused rhs
       |> Option.some
 
+    let mul_two_reduce (rw : Rewriter.t) node : Rewriter.t option =
+      let* instr = Rewriter.get_instr rw node in
+      let* (lhs_reg, rhs_reg, reg, next) =
+        match instr with
+        | Iop (Omul, [lhs; rhs], reg, next) -> Some (lhs, rhs, reg, next)
+        | _ -> None
+      in
+      let* lhs = Rewriter.definition rw lhs_reg in
+      let* rhs = Rewriter.definition rw rhs_reg in
+
+      (* Get the right hand side and check it is constant 2 *)
+      let* rhs_instr = Rewriter.get_instr rw rhs in
+      let* const2 =
+        match rhs_instr with
+        | Iop (Ointconst n, [], _, _) when Z.eq n (Z.of_uint 2) -> Some ()
+        | _ -> None
+      in
+
+      let new_node = Iop (Oadd, [lhs; lhs], reg, next) in
+
+      rw
+      |> Rewriter.replace_node_inplace node new_node
+      |> Rewriter.erase_node_if_unused rhs
+      |> Option.some
+
     let rewrite_first (fn : coq_function) (op : operation) (pat : pattern) : coq_function =
       let rw = Rewriter.from_code fn.fn_code in
       let rec first_node node : node option =
@@ -129,6 +180,24 @@ module CustomRewriter =
         |> Rewriter.get_code
       in
       { fn with fn_code }
+
+    let rewrite_first_add (fn : coq_function) (pat : pattern) : coq_function =
+      rewrite_first fn Oadd pat
+
+    let rewrite_forwards (fn : coq_function) (pat : pattern) : coq_function =
+      let rw = Rewriter.from_code fn.fn_code in
+
+      let rec go rw node =
+        Option.value ~default:rw @@
+        let* instr = Rewriter.get_instr rw node in
+        let+ next = Rewriter.instr_succ instr in
+
+        let rw = Option.value ~default:rw (pat rw node) in
+        go rw next
+      in
+
+      let rw = go rw fn.fn_entrypoint in
+      { fn with fn_code = Rewriter.get_code rw }
 
   end
 
@@ -208,13 +277,12 @@ module Program =
 
   end
 
-module Rewrite =
-  struct
-    let add_constant_folding = PatternRewriter.apply_in_function Pattern.add_constant_folding
-    let add_zero_folding = PatternRewriter.apply_in_function Pattern.add_zero_folding
-    let mul_two_reduce = PatternRewriter.apply_in_function Pattern.mul_two_reduce
-    let add_zero_first_add fn = CustomRewriter.rewrite_first fn Oadd CustomRewriter.add_zero_folding
-  end
+let rewrite_worklist (fn : coq_function) pattern =
+  PatternRewriter.apply_in_function pattern fn
+
+let rewrite_first_add = Custom.rewrite_first_add
+
+let rewrite_forwards = Custom.rewrite_forwards
 
 let stringify (fn : coq_function) : string =
   (* From https://stackoverflow.com/a/20576176 *)
@@ -230,41 +298,60 @@ let time name f =
   printf "%s time (s): %.10f\n" name (Unix.gettimeofday () -. t);
   res
 
-let run n create rewrite print : coq_function =
+let run n create rewrite_driver rewrite_pattern print : coq_function =
   let benchmark = time "create" (fun () -> create n) in
-  let rewritten = time "rewrite" (fun () -> rewrite benchmark) in
+  let rewritten = time "rewrite" (fun () -> rewrite_driver benchmark rewrite_pattern) in
   if print then PrintSSA.print_function stdout P.one rewritten;
+  rewritten
+
+let run_sccp n create : coq_function =
+  let benchmark = time "create" (fun () -> create n) in
+  let rewritten = time "rewrite" (fun () -> SCCPopt.transf_function benchmark) in
   rewritten
 
 let run_bench name n : coq_function =
   printf "CompCertSSA benchmark %s %d\n" name n;
 
+  let open Program in
+
   match name with
-  | "constant-folding" ->             run n Program.add_one_tree                Rewrite.add_constant_folding true
-  | "add-zero" ->                     run n Program.add_zero_tree               Rewrite.add_zero_folding     true
-  | "add-zero-reuse" ->               run n Program.add_zero_reuse_tree         Rewrite.add_zero_folding     true
-  | "add-zero-once-operand-reused" -> run n Program.add_zero_reuse_tree         Rewrite.add_zero_first_add   false
-  | "add-zero-one-operation-reuse" -> run n Program.add_zero_lots_of_reuse_tree Rewrite.add_zero_first_add   false
-  | "mul2-reduce" ->                  run n Program.mul_two_tree                Rewrite.mul_two_reduce       false
-  | "add-zero-sccp" ->                run n Program.add_zero_tree               SCCPopt.transf_function      false
-  | "constant-folding-sccp" ->        run n Program.add_one_tree                SCCPopt.transf_function      false
+  | "add-fold-worklist" ->            run n add_one_tree                rewrite_worklist   Pattern.add_constant_folding true
+  | "add-zero-worklist" ->            run n add_zero_tree               rewrite_worklist   Pattern.add_zero_folding     true
+  | "add-zero-reuse-worklist" ->      run n add_zero_reuse_tree         rewrite_worklist   Pattern.add_zero_folding     true
+  | "mul-two-worklist" ->             run n mul_two_tree                rewrite_worklist   Pattern.mul_two_reduce      false
+
+  | "add-fold-forwards" ->            run n add_one_tree                rewrite_forwards   Custom.add_constant_folding  true
+  | "add-zero-forwards" ->            run n add_zero_tree               rewrite_forwards   Custom.add_zero_folding      true
+  | "add-zero-reuse-forwards" ->      run n add_zero_reuse_tree         rewrite_forwards   Custom.add_zero_folding      true
+  | "mul-two-forwards" ->             run n mul_two_tree                rewrite_forwards   Custom.mul_two_reduce       false
+
+  | "add-zero-reuse-first" ->         run n add_zero_reuse_tree         rewrite_first_add  Custom.add_zero_folding     false
+  | "add-zero-lots-of-reuse-first" -> run n add_zero_lots_of_reuse_tree rewrite_first_add  Custom.add_zero_folding     false
+
+  | "add-fold-sccp" ->                run_sccp n add_one_tree
+  | "add-zero-sccp" ->                run_sccp n add_zero_tree
   | _ -> failwith "Unrecognised benchmark\n"
 
 let test =
-  let expect fn expected =
-    let actual = stringify fn in
+  let expect fns expected =
     let split = Str.split (Str.regexp "[\n\t ]+") in
-    let actual_split = split actual in
     let expected_split = split expected in
 
-    if not (actual_split = expected_split) then (
-      printf "expected:\n{|%s|}\n" expected;
-      printf "actual:\n{|%s|}\n" actual;
-      failwith "Test mismatch"
-    )
+    let test_one fn =
+      let actual = stringify fn in
+      let actual_split = split actual in
+
+      if not (actual_split = expected_split) then (
+        printf "expected:\n{|%s|}\n" expected;
+        printf "actual:\n{|%s|}\n" actual;
+        failwith "Test mismatch"
+      )
+    in
+
+    List.map test_one fns |> ignore
   in
 
-  expect (run_bench "constant-folding" 10)
+  expect [(run_bench "add-fold-worklist" 10); (run_bench "add-fold-forwards" 10)]
 {|$1() {
         goto 1
    23:  return x22
@@ -273,7 +360,7 @@ let test =
     1:  goto 22
 }|};
 
-  expect (run_bench "add-zero" 10)
+  expect [(run_bench "add-zero-worklist" 10); (run_bench "add-zero-forwards" 10)]
 {|$1() {
         goto 1
    23:  return x2
@@ -282,7 +369,7 @@ let test =
     1:  goto 2
 }|};
 
-  expect (run_bench "mul2-reduce" 10)
+  expect [(run_bench "mul-two-worklist" 10); (run_bench "mul-two-forwards" 10)]
 {|$1() {
         goto 1
    23:  return x22
@@ -311,7 +398,7 @@ let test =
     1:  goto 2
 }|};
 
-  expect (Program.add_zero_reuse_tree 5)
+  expect [(Program.add_zero_reuse_tree 5)]
 {|$1() {
         goto 1
     9:  return x8
@@ -332,7 +419,7 @@ let test =
     1:  goto 2
 }|};
 
-  expect (run_bench "add-zero-reuse" 10)
+  expect [(run_bench "add-zero-reuse-worklist" 10); (run_bench "add-zero-reuse-forwards" 10)]
 {|$1() {
         goto 1
    14:  return x2
@@ -341,7 +428,7 @@ let test =
     1:  goto 2
 }|};
 
-  expect (run_bench "add-zero-once-operand-reused" 5)
+  expect [(run_bench "add-zero-reuse-first" 5)]
 {|$1() {
         goto 1
     9:  return x8
@@ -360,7 +447,7 @@ let test =
     1:  goto 2
 }|};
 
-  expect (Program.add_zero_lots_of_reuse_tree 5)
+  expect [(Program.add_zero_lots_of_reuse_tree 5)]
 {|$1() {
         goto 1
    10:  return x9
@@ -383,7 +470,7 @@ let test =
     1:  goto 2
 }|};
 
-  expect (run_bench "add-zero-one-operation-reuse" 5)
+  expect [(run_bench "add-zero-lots-of-reuse-first" 5)]
 {|$1() {
         goto 1
    10:  return x9
