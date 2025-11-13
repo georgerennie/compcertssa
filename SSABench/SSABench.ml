@@ -182,22 +182,28 @@ module Program =
          %2 = [opcode] %0, %1 : int
          %3 = arith.constant [inc] : int
          %4 = [opcode] %2, %3 : int
-         ... *)
-    let const_fold_tree op n root inc : coq_function =
+         ...
+
+       ((100 - pc) / n) ops have type Oand instead, to reduce the amount
+       rewritten
+    *)
+    let const_fold_tree op n pc root inc : coq_function =
       let b = FnBuilder.empty in
       let (b, root_node) = b |> FnBuilder.int_const root in
       let rec go b acc = function
         | 0 -> b |> FnBuilder.return acc
         | i ->
+          let this_op = if ((n - i) mod 100 < pc) then op else Oand in
+
           let (b, const) = b |> FnBuilder.int_const inc in
-          let (b, acc) = b |> FnBuilder.add (fun r n -> Iop (op, [acc; const], r, n)) in
+          let (b, acc) = b |> FnBuilder.add (fun r n -> Iop (this_op, [acc; const], r, n)) in
           go b acc (i - 1)
       in
       go b root_node n
 
-    let add_zero_tree n = const_fold_tree Oadd n 42l 0l
-    let add_one_tree n = const_fold_tree Oadd n 42l 1l
-    let mul_two_tree n = const_fold_tree Omul n 42l 2l
+    let add_zero_tree n pc = const_fold_tree Oadd n pc 42l 0l
+    let add_one_tree n pc = const_fold_tree Oadd n pc 42l 1l
+    let mul_two_tree n pc = const_fold_tree Omul n pc 42l 2l
 
     (* Create a program that looks like:
        func @main() -> int {
@@ -206,7 +212,7 @@ module Program =
          %2 = [opcode] %0, %reuse : int
          %3 = [opcode] %2, %reuse : int
          ... *)
-    let const_reuse_tree op n root inc : coq_function =
+    let const_reuse_tree op n pc root inc : coq_function =
       let b = FnBuilder.empty in
       let (b, root) = b |> FnBuilder.int_const root in
       let (b, reuse) = b |> FnBuilder.int_const inc in
@@ -214,12 +220,14 @@ module Program =
       let rec go b acc = function
         | 0 -> b |> FnBuilder.return acc
         | i ->
-          let (b, acc) = b |> FnBuilder.add (fun r n -> Iop (op, [acc; reuse], r, n)) in
+          let this_op = if ((n - i) mod 100 < pc) then op else Oand in
+
+          let (b, acc) = b |> FnBuilder.add (fun r n -> Iop (this_op, [acc; reuse], r, n)) in
           go b acc (i - 1)
       in
       go b root n
 
-    let add_zero_reuse_tree n = const_reuse_tree Oadd n 42l 0l
+    let add_zero_reuse_tree n pc = const_reuse_tree Oadd n pc 42l 0l
 
     (* Create a program that looks like:
        func @main() -> int {
@@ -230,7 +238,7 @@ module Program =
          %4 = [opcode] %3, %reuse : int
          %5 = [opcode] %4, %reuse : int
         ... *)
-    let const_lots_of_reuse_tree op n lhs rhs =
+    let const_lots_of_reuse_tree op n pc lhs rhs =
       let b = FnBuilder.empty in
       let (b, lhs_node) = b |> FnBuilder.int_const lhs in
       let (b, rhs_node) = b |> FnBuilder.int_const rhs in
@@ -239,12 +247,14 @@ module Program =
       let rec go b acc = function
         | 0 -> b |> FnBuilder.return acc
         | i ->
-          let (b, acc) = b |> FnBuilder.add (fun r n -> Iop (op, [acc; reuse], r, n)) in
+          let this_op = if ((n - i) mod 100 < pc) then op else Oand in
+
+          let (b, acc) = b |> FnBuilder.add (fun r n -> Iop (this_op, [acc; reuse], r, n)) in
           go b acc (i - 1)
       in
       go b reuse n
 
-    let add_zero_lots_of_reuse_tree n = const_lots_of_reuse_tree Oadd n 42l 0l
+    let add_zero_lots_of_reuse_tree n pc = const_lots_of_reuse_tree Oadd n pc 42l 0l
 
   end
 
@@ -297,35 +307,37 @@ let stringify (fn : coq_function) : string =
   Out_channel.close outc;
   In_channel.input_all inc
 
-let run n create rewrite_driver rewrite_pattern print : coq_function =
-  let benchmark = time "create" (fun () -> create n) in
+let run n pc create rewrite_driver rewrite_pattern print : coq_function =
+  let benchmark = time "create" (fun () -> create n pc) in
   let rewritten = time "rewrite" (fun () -> rewrite_driver benchmark rewrite_pattern) in
   if print then PrintSSA.print_function stdout P.one rewritten;
   rewritten
 
 let run_sccp n create : coq_function =
-  let benchmark = time "create" (fun () -> create n) in
+  let benchmark = time "create" (fun () -> create n 100) in
   let rewritten = time "rewrite" (fun () -> SCCPopt.transf_function benchmark) in
   rewritten
 
-let run_bench name n : coq_function =
+let run_bench name ?(pc=100) n  : coq_function =
   printf "CompCertSSA benchmark %s %d\n" name n;
 
   let open Program in
 
+  let print = (pc = 100) in
+
   match name with
-  | "add-fold-worklist" ->            run n add_one_tree                rewrite_worklist   Pattern.add_constant_folding true
-  | "add-zero-worklist" ->            run n add_zero_tree               rewrite_worklist   Pattern.add_zero_folding     true
-  | "add-zero-reuse-worklist" ->      run n add_zero_reuse_tree         rewrite_worklist   Pattern.add_zero_folding     true
-  | "mul-two-worklist" ->             run n mul_two_tree                rewrite_worklist   Pattern.mul_two_reduce      false
+  | "add-fold-worklist" ->            run n pc add_one_tree                rewrite_worklist   Pattern.add_constant_folding print
+  | "add-zero-worklist" ->            run n pc add_zero_tree               rewrite_worklist   Pattern.add_zero_folding     print
+  | "add-zero-reuse-worklist" ->      run n pc add_zero_reuse_tree         rewrite_worklist   Pattern.add_zero_folding     print
+  | "mul-two-worklist" ->             run n pc mul_two_tree                rewrite_worklist   Pattern.mul_two_reduce       false
 
-  | "add-fold-forwards" ->            run n add_one_tree                rewrite_forwards   Custom.add_constant_folding  true
-  | "add-zero-forwards" ->            run n add_zero_tree               rewrite_forwards   Custom.add_zero_folding      true
-  | "add-zero-reuse-forwards" ->      run n add_zero_reuse_tree         rewrite_forwards   Custom.add_zero_folding      true
-  | "mul-two-forwards" ->             run n mul_two_tree                rewrite_forwards   Custom.mul_two_reduce       false
+  | "add-fold-forwards" ->            run n pc add_one_tree                rewrite_forwards   Custom.add_constant_folding  print
+  | "add-zero-forwards" ->            run n pc add_zero_tree               rewrite_forwards   Custom.add_zero_folding      print
+  | "add-zero-reuse-forwards" ->      run n pc add_zero_reuse_tree         rewrite_forwards   Custom.add_zero_folding      print
+  | "mul-two-forwards" ->             run n pc mul_two_tree                rewrite_forwards   Custom.mul_two_reduce        false
 
-  | "add-zero-reuse-first" ->         run n add_zero_reuse_tree         rewrite_first_add  Custom.add_zero_folding     false
-  | "add-zero-lots-of-reuse-first" -> run n add_zero_lots_of_reuse_tree rewrite_first_add  Custom.add_zero_folding     false
+  | "add-zero-reuse-first" ->         run n pc add_zero_reuse_tree         rewrite_first_add  Custom.add_zero_folding      false
+  | "add-zero-lots-of-reuse-first" -> run n pc add_zero_lots_of_reuse_tree rewrite_first_add  Custom.add_zero_folding      false
 
   | "add-fold-sccp" ->                run_sccp n add_one_tree
   | "add-zero-sccp" ->                run_sccp n add_zero_tree
@@ -397,7 +409,7 @@ let test () =
     1:  goto 2
 }|};
 
-  expect [(Program.add_zero_reuse_tree 5)]
+  expect [(Program.add_zero_reuse_tree 5 100)]
 {|$1() {
         goto 1
     9:  return x8
@@ -446,7 +458,7 @@ let test () =
     1:  goto 2
 }|};
 
-  expect [(Program.add_zero_lots_of_reuse_tree 5)]
+  expect [(Program.add_zero_lots_of_reuse_tree 5 100)]
 {|$1() {
         goto 1
    10:  return x9
@@ -500,6 +512,7 @@ let _ =
 
   match Sys.argv with
   | [|_; "test"|] -> test ()
-  | [|_; bench|] -> run_bench bench 50000 |> ignore
-  | [|_; bench; n|] -> run_bench bench (int_of_string n) |> ignore
-  | _ -> printf "Usage: ssabench [benchmark <n>]\n"
+  | [|_; bench|]        -> run_bench bench 50000 |> ignore
+  | [|_; bench; n|]     -> run_bench bench (int_of_string n) |> ignore
+  | [|_; bench; n; pc|] -> run_bench bench (int_of_string n) ~pc:(int_of_string pc) |> ignore
+  | _ -> printf "Usage: ssabench [benchmark <n> <percent>]\n"
