@@ -100,17 +100,17 @@ module CustomRewriter =
       let* lhs = Rewriter.definition rw lhs_reg in
       let* rhs = Rewriter.definition rw rhs_reg in
 
-      (* Get the left hand side and check it is constant 0 *)
-      let* lhs_instr = Rewriter.get_instr rw lhs in
+      (* Get the right hand side and check it is constant 0 *)
+      let* rhs_instr = Rewriter.get_instr rw rhs in
       let* const0 =
-        match lhs_instr with
+        match rhs_instr with
         | Iop (Ointconst n, [], _, _) when Z.eq n Z.zero -> Some ()
         | _ -> None
       in
 
-      let (rw, _) = rw |> Rewriter.replace_node node rhs in
+      let (rw, _) = rw |> Rewriter.replace_node node lhs in
       rw
-      |> Rewriter.erase_node_if_unused lhs
+      |> Rewriter.erase_node_if_unused rhs
       |> Option.some
 
     let rewrite_first (fn : coq_function) (op : operation) (pat : pattern) : coq_function =
@@ -118,7 +118,7 @@ module CustomRewriter =
       let rec first_node node : node option =
         let* instr = Rewriter.get_instr rw node in
         match instr with
-        | Iop (op, _, _, _) -> Option.some node
+        | Iop (o, _, _, _) when o = op -> Option.some node
         | _ -> let* next = Rewriter.instr_succ instr in first_node next
       in
       let node = first_node fn.fn_entrypoint |> Option.get in
@@ -216,6 +216,14 @@ module Rewrite =
     let add_zero_first_add fn = CustomRewriter.rewrite_first fn Oadd CustomRewriter.add_zero_folding
   end
 
+let stringify (fn : coq_function) : string =
+  (* From https://stackoverflow.com/a/20576176 *)
+  let (ind, outd) = Unix.pipe () in
+  let (inc, outc) = (Unix.in_channel_of_descr ind, Unix.out_channel_of_descr outd) in
+  PrintSSA.print_function outc P.one fn;
+  Out_channel.close outc;
+  In_channel.input_all inc
+
 let time name f =
   let t = Unix.gettimeofday () in
   let res = f () in
@@ -228,8 +236,7 @@ let run n create rewrite print : coq_function =
   if print then PrintSSA.print_function stdout P.one rewritten;
   rewritten
 
-
-let run_benchmark name n : coq_function =
+let run_bench name n : coq_function =
   printf "CompCertSSA benchmark %s %d\n" name n;
 
   match name with
@@ -243,6 +250,160 @@ let run_benchmark name n : coq_function =
   | "constant-folding-sccp" ->        run n Program.add_one_tree                SCCPopt.transf_function      false
   | _ -> failwith "Unrecognised benchmark\n"
 
+let test =
+  let expect fn expected =
+    let actual = stringify fn in
+    let split = Str.split (Str.regexp "[\n\t ]+") in
+    let actual_split = split actual in
+    let expected_split = split expected in
+
+    if not (actual_split = expected_split) then (
+      printf "expected:\n{|%s|}\n" expected;
+      printf "actual:\n{|%s|}\n" actual;
+      failwith "Test mismatch"
+    )
+  in
+
+  expect (run_bench "constant-folding" 10)
+{|$1() {
+        goto 1
+   23:  return x22
+   22:  x22 = 52
+        goto 23
+    1:  goto 22
+}|};
+
+  expect (run_bench "add-zero" 10)
+{|$1() {
+        goto 1
+   23:  return x2
+    2:  x2 = 42
+        goto 23
+    1:  goto 2
+}|};
+
+  expect (run_bench "mul2-reduce" 10)
+{|$1() {
+        goto 1
+   23:  return x22
+   22:  x22 = x20 + x20
+        goto 23
+   20:  x20 = x18 + x18
+        goto 22
+   18:  x18 = x16 + x16
+        goto 20
+   16:  x16 = x14 + x14
+        goto 18
+   14:  x14 = x12 + x12
+        goto 16
+   12:  x12 = x10 + x10
+        goto 14
+   10:  x10 = x8 + x8
+        goto 12
+    8:  x8 = x6 + x6
+        goto 10
+    6:  x6 = x4 + x4
+        goto 8
+    4:  x4 = x2 + x2
+        goto 6
+    2:  x2 = 42
+        goto 4
+    1:  goto 2
+}|};
+
+  expect (Program.add_zero_reuse_tree 5)
+{|$1() {
+        goto 1
+    9:  return x8
+    8:  x8 = x7 + x3
+        goto 9
+    7:  x7 = x6 + x3
+        goto 8
+    6:  x6 = x5 + x3
+        goto 7
+    5:  x5 = x4 + x3
+        goto 6
+    4:  x4 = x2 + x3
+        goto 5
+    3:  x3 = 0
+        goto 4
+    2:  x2 = 42
+        goto 3
+    1:  goto 2
+}|};
+
+  expect (run_bench "add-zero-reuse" 10)
+{|$1() {
+        goto 1
+   14:  return x2
+    2:  x2 = 42
+        goto 14
+    1:  goto 2
+}|};
+
+  expect (run_bench "add-zero-once-operand-reused" 5)
+{|$1() {
+        goto 1
+    9:  return x8
+    8:  x8 = x7 + x3
+        goto 9
+    7:  x7 = x6 + x3
+        goto 8
+    6:  x6 = x5 + x3
+        goto 7
+    5:  x5 = x2 + x3
+        goto 6
+    3:  x3 = 0
+        goto 5
+    2:  x2 = 42
+        goto 3
+    1:  goto 2
+}|};
+
+  expect (Program.add_zero_lots_of_reuse_tree 5)
+{|$1() {
+        goto 1
+   10:  return x9
+    9:  x9 = x8 + x4
+        goto 10
+    8:  x8 = x7 + x4
+        goto 9
+    7:  x7 = x6 + x4
+        goto 8
+    6:  x6 = x5 + x4
+        goto 7
+    5:  x5 = x4 + x4
+        goto 6
+    4:  x4 = x2 + x3
+        goto 5
+    3:  x3 = 0
+        goto 4
+    2:  x2 = 42
+        goto 3
+    1:  goto 2
+}|};
+
+  expect (run_bench "add-zero-one-operation-reuse" 5)
+{|$1() {
+        goto 1
+   10:  return x9
+    9:  x9 = x8 + x2
+        goto 10
+    8:  x8 = x7 + x2
+        goto 9
+    7:  x7 = x6 + x2
+        goto 8
+    6:  x6 = x5 + x2
+        goto 7
+    5:  x5 = x2 + x2
+        goto 6
+    2:  x2 = 42
+        goto 5
+    1:  goto 2
+}|};
+
+  printf "All tests passed!\n"
+
 let _ =
   (* The compcert driver sets this and it seems to improve perf ~30% *)
   Gc.set {
@@ -252,6 +413,7 @@ let _ =
   };
 
   match Sys.argv with
-  | [|_; bench|] -> run_benchmark bench 50000 |> ignore
-  | [|_; bench; n|] -> run_benchmark bench (int_of_string n) |> ignore
+  | [|_; "test"|] -> test
+  | [|_; bench|] -> run_bench bench 50000 |> ignore
+  | [|_; bench; n|] -> run_bench bench (int_of_string n) |> ignore
   | _ -> printf "Usage: ssabench [benchmark <n>]\n"
