@@ -328,7 +328,7 @@ let run_bench name n : coq_function =
   | "add-zero-sccp" ->                run_sccp n add_zero_tree
   | _ -> failwith "Unrecognised benchmark\n"
 
-let test =
+let test () =
   let expect fns expected =
     let split = Str.split (Str.regexp "[\n\t ]+") in
     let expected_split = split expected in
@@ -496,7 +496,7 @@ let _ =
   };
 
   match Sys.argv with
-  | [|_; "test"|] -> test
+  | [|_; "test"|] -> test ()
   | [|_; bench|] -> run_bench bench 50000 |> ignore
   | [|_; bench; n|] -> run_bench bench (int_of_string n) |> ignore
   | _ -> printf "Usage: ssabench [benchmark <n>]\n"
