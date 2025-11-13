@@ -6,6 +6,12 @@ open Printf
 let (let*) o f = Option.bind o f
 let (let+) o f = Option.map f o
 
+let time name f =
+  let t = Unix.gettimeofday () in
+  let res = f () in
+  printf "%s time (s): %.10f\n" name (Unix.gettimeofday () -. t);
+  res
+
 module Pattern =
   struct
     let add_constant_folding (rw : PatternRewriter.t) node : PatternRewriter.t option =
@@ -243,10 +249,12 @@ module Program =
   end
 
 let rewrite_worklist (fn : coq_function) pattern =
-  PatternRewriter.apply_in_function pattern fn
+  let ctx = time "chain" (fun () -> Rewriter.from_code fn.fn_code) in
+  let ctx = PatternRewriter.apply_in_code pattern ctx in
+  { fn with fn_code = Rewriter.get_code ctx }
 
 let rewrite_first (fn : coq_function) (op : operation) (pat : Custom.pattern) : coq_function =
-  let rw = Rewriter.from_code fn.fn_code in
+  let rw = time "chain" (fun () -> Rewriter.from_code fn.fn_code) in
   let rec first_node node : node option =
     let* instr = Rewriter.get_instr rw node in
     match instr with
@@ -266,7 +274,7 @@ let rewrite_first_add (fn : coq_function) (pat : Custom.pattern) : coq_function 
   rewrite_first fn Oadd pat
 
 let rewrite_forwards (fn : coq_function) (pat : Custom.pattern) : coq_function =
-  let rw = Rewriter.from_code fn.fn_code in
+  let rw = time "chain" (fun () -> Rewriter.from_code fn.fn_code) in
 
   let rec go rw node =
     Option.value ~default:rw @@
@@ -287,12 +295,6 @@ let stringify (fn : coq_function) : string =
   PrintSSA.print_function outc P.one fn;
   Out_channel.close outc;
   In_channel.input_all inc
-
-let time name f =
-  let t = Unix.gettimeofday () in
-  let res = f () in
-  printf "%s time (s): %.10f\n" name (Unix.gettimeofday () -. t);
-  res
 
 let run n create rewrite_driver rewrite_pattern print : coq_function =
   let benchmark = time "create" (fun () -> create n) in

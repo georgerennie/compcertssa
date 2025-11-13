@@ -101,13 +101,7 @@ let apply_once_in_code (pattern : rewrite_pattern) (ctx : Rewriter.t) : (Rewrite
   in
   go rw
 
-let apply_in_code (pattern : rewrite_pattern) (code : code) : code =
-  let rec go ctx =
-    match apply_once_in_code pattern ctx with
-    | ctx, false -> Rewriter.get_code ctx
-    | ctx, true -> go ctx
-  in
-  go (Rewriter.from_code code)
-
-let apply_in_function (pattern : rewrite_pattern) (fn : coq_function) : coq_function =
-  { fn with fn_code = apply_in_code pattern fn.fn_code }
+let rec apply_in_code (pattern : rewrite_pattern) (ctx : Rewriter.t) : Rewriter.t =
+  match apply_once_in_code pattern ctx with
+  | ctx, false -> ctx
+  | ctx, true -> apply_in_code pattern ctx
