@@ -487,7 +487,7 @@ let add_tree_benchmark_one_operation_lots_of_reuse n root inc =
   in
   go b reuse n
 
-let add_zero_one_operation_reuse_benchmark n = add_tree_benchmark_one_operation_lots_of_reuse n 42l 0l
+let add_zero_one_operation_lots_of_reuse_benchmark n = add_tree_benchmark_one_operation_lots_of_reuse n 42l 0l
 
 let mul2_tree_benchmark n root =
   let (b, root) =
@@ -636,8 +636,10 @@ let run_bench name n =
   match name with
   | "add-zero" -> run add_zero_benchmark rewrite_add_zero true
   | "add-zero-reuse" -> run add_zero_reuse_benchmark rewrite_add_zero true
+  | "add-zero-once-operand-reused" ->
+    run add_zero_reuse_benchmark rewrite_add_zero_one_operation false
   | "add-zero-one-operation-reuse" ->
-    run add_zero_one_operation_reuse_benchmark rewrite_add_zero_one_operation false
+    run add_zero_one_operation_lots_of_reuse_benchmark rewrite_add_zero_one_operation false
   | "add-zero-sccp" -> run add_zero_benchmark SCCPopt.transf_function false
   | "constant-folding" -> run add_const_benchmark rewrite_add_const true
   | "constant-folding-sccp" -> run add_const_benchmark SCCPopt.transf_function false
