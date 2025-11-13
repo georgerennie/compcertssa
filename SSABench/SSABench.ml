@@ -277,12 +277,13 @@ let rewrite_forwards (fn : coq_function) (pat : Custom.pattern) : coq_function =
   let rw = time "chain" (fun () -> Rewriter.from_code fn.fn_code) in
 
   let rec go rw node =
-    Option.value ~default:rw @@
-    let* instr = Rewriter.get_instr rw node in
-    let+ next = Rewriter.instr_succ instr in
-
+    let instr = Rewriter.get_instr rw node in
+    let next = Option.bind instr Rewriter.instr_succ in
     let rw = Option.value ~default:rw (pat rw node) in
-    go rw next
+
+    match next with
+    | None -> rw
+    | Some next -> go rw next
   in
 
   let rw = go rw fn.fn_entrypoint in
