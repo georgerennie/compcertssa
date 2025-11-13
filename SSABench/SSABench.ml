@@ -164,41 +164,6 @@ module Custom =
       |> Rewriter.erase_node_if_unused rhs
       |> Option.some
 
-    let rewrite_first (fn : coq_function) (op : operation) (pat : pattern) : coq_function =
-      let rw = Rewriter.from_code fn.fn_code in
-      let rec first_node node : node option =
-        let* instr = Rewriter.get_instr rw node in
-        match instr with
-        | Iop (o, _, _, _) when o = op -> Option.some node
-        | _ -> let* next = Rewriter.instr_succ instr in first_node next
-      in
-      let node = first_node fn.fn_entrypoint |> Option.get in
-
-      let fn_code =
-        pat rw node
-        |> Option.value ~default:rw
-        |> Rewriter.get_code
-      in
-      { fn with fn_code }
-
-    let rewrite_first_add (fn : coq_function) (pat : pattern) : coq_function =
-      rewrite_first fn Oadd pat
-
-    let rewrite_forwards (fn : coq_function) (pat : pattern) : coq_function =
-      let rw = Rewriter.from_code fn.fn_code in
-
-      let rec go rw node =
-        Option.value ~default:rw @@
-        let* instr = Rewriter.get_instr rw node in
-        let+ next = Rewriter.instr_succ instr in
-
-        let rw = Option.value ~default:rw (pat rw node) in
-        go rw next
-      in
-
-      let rw = go rw fn.fn_entrypoint in
-      { fn with fn_code = Rewriter.get_code rw }
-
   end
 
 module Program =
@@ -230,10 +195,10 @@ module Program =
 
     (* Create a program that looks like:
        func @main() -> int {
-         %0 = arith.constant 3 : int
-         %reuse = arith.constant inc : int
-         %2 = arith.addi %reuse, %0 : int
-         %3 = arith.addi %reuse, %2 : int
+         %0 = arith.constant [root] : int
+         %reuse = arith.constant [inc]: int
+         %2 = [opcode] %0, %reuse : int
+         %3 = [opcode] %2, %reuse : int
          ... *)
     let const_reuse_tree op n root inc : coq_function =
       let b = FnBuilder.empty in
@@ -280,9 +245,40 @@ module Program =
 let rewrite_worklist (fn : coq_function) pattern =
   PatternRewriter.apply_in_function pattern fn
 
-let rewrite_first_add = Custom.rewrite_first_add
+let rewrite_first (fn : coq_function) (op : operation) (pat : Custom.pattern) : coq_function =
+  let rw = Rewriter.from_code fn.fn_code in
+  let rec first_node node : node option =
+    let* instr = Rewriter.get_instr rw node in
+    match instr with
+    | Iop (o, _, _, _) when o = op -> Option.some node
+    | _ -> let* next = Rewriter.instr_succ instr in first_node next
+  in
+  let node = first_node fn.fn_entrypoint |> Option.get in
 
-let rewrite_forwards = Custom.rewrite_forwards
+  let fn_code =
+    pat rw node
+    |> Option.value ~default:rw
+    |> Rewriter.get_code
+  in
+  { fn with fn_code }
+
+let rewrite_first_add (fn : coq_function) (pat : Custom.pattern) : coq_function =
+  rewrite_first fn Oadd pat
+
+let rewrite_forwards (fn : coq_function) (pat : Custom.pattern) : coq_function =
+  let rw = Rewriter.from_code fn.fn_code in
+
+  let rec go rw node =
+    Option.value ~default:rw @@
+    let* instr = Rewriter.get_instr rw node in
+    let+ next = Rewriter.instr_succ instr in
+
+    let rw = Option.value ~default:rw (pat rw node) in
+    go rw next
+  in
+
+  let rw = go rw fn.fn_entrypoint in
+  { fn with fn_code = Rewriter.get_code rw }
 
 let stringify (fn : coq_function) : string =
   (* From https://stackoverflow.com/a/20576176 *)
